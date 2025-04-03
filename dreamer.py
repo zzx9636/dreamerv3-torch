@@ -4,13 +4,16 @@ import os
 import pathlib
 import sys
 
+# Set the rendering backend for Mujoco
 os.environ["MUJOCO_GL"] = "osmesa"
 
 import numpy as np
 import ruamel.yaml as yaml
 
+# Add the current script's directory to the Python path
 sys.path.append(str(pathlib.Path(__file__).parent))
 
+# Import custom modules and libraries
 import exploration as expl
 import models
 import tools
@@ -21,12 +24,26 @@ import torch
 from torch import nn
 from torch import distributions as torchd
 
-
+# Utility function to convert tensors to numpy arrays
 to_np = lambda x: x.detach().cpu().numpy()
 
 
 class Dreamer(nn.Module):
+    """
+    Dreamer agent implementation for model-based reinforcement learning.
+    """
+
     def __init__(self, obs_space, act_space, config, logger, dataset):
+        """
+        Initialize the Dreamer agent.
+
+        Args:
+            obs_space: Observation space of the environment.
+            act_space: Action space of the environment.
+            config: Configuration object with hyperparameters.
+            logger: Logger instance for logging metrics.
+            dataset: Dataset for training the agent.
+        """
         super(Dreamer, self).__init__()
         self._config = config
         self._logger = logger
@@ -37,17 +54,20 @@ class Dreamer(nn.Module):
         self._should_reset = tools.Every(config.reset_every)
         self._should_expl = tools.Until(int(config.expl_until / config.action_repeat))
         self._metrics = {}
-        # this is update step
-        self._step = logger.step // config.action_repeat
+        self._step = logger.step // config.action_repeat  # Update step
         self._update_count = 0
         self._dataset = dataset
+
+        # Initialize world model and behaviors
         self._wm = models.WorldModel(obs_space, act_space, self._step, config)
         self._task_behavior = models.ImagBehavior(config, self._wm)
-        if (
-            config.compile and os.name != "nt"
-        ):  # compilation is not supported on windows
+
+        # Compile models if supported
+        if config.compile and os.name != "nt":  # Compilation not supported on Windows
             self._wm = torch.compile(self._wm)
             self._task_behavior = torch.compile(self._task_behavior)
+
+        # Define exploration behavior
         reward = lambda f, s, a: self._wm.heads["reward"](f).mean()
         self._expl_behavior = dict(
             greedy=lambda: self._task_behavior,
@@ -56,6 +76,19 @@ class Dreamer(nn.Module):
         )[config.expl_behavior]().to(self._config.device)
 
     def __call__(self, obs, reset, state=None, training=True):
+        """
+        Perform a forward pass and optionally train the agent.
+
+        Args:
+            obs: Observations from the environment.
+            reset: Reset signals for the environment.
+            state: Current state of the agent.
+            training: Whether the agent is in training mode.
+
+        Returns:
+            policy_output: Output of the policy.
+            state: Updated state of the agent.
+        """
         step = self._step
         if training:
             steps = (
@@ -73,7 +106,7 @@ class Dreamer(nn.Module):
                     self._metrics[name] = []
                 if self._config.video_pred_log:
                     openl = self._wm.video_pred(next(self._dataset))
-                    self._logger.video("train_openl", to_np(openl))
+                    self._logger.video("train_openl", openl)
                 self._logger.write(fps=True)
 
         policy_output, state = self._policy(obs, state, training)
@@ -84,6 +117,18 @@ class Dreamer(nn.Module):
         return policy_output, state
 
     def _policy(self, obs, state, training):
+        """
+        Compute the policy output based on the current state and observations.
+
+        Args:
+            obs: Observations from the environment.
+            state: Current state of the agent.
+            training: Whether the agent is in training mode.
+
+        Returns:
+            policy_output: Output of the policy.
+            state: Updated state of the agent.
+        """
         if state is None:
             latent = action = None
         else:
@@ -115,6 +160,12 @@ class Dreamer(nn.Module):
         return policy_output, state
 
     def _train(self, data):
+        """
+        Train the agent using the provided data.
+
+        Args:
+            data: Training data.
+        """
         metrics = {}
         post, context, mets = self._wm._train(data)
         metrics.update(mets)
@@ -134,16 +185,46 @@ class Dreamer(nn.Module):
 
 
 def count_steps(folder):
+    """
+    Count the total number of steps in the given folder.
+
+    Args:
+        folder: Path to the folder containing episode files.
+
+    Returns:
+        Total number of steps.
+    """
     return sum(int(str(n).split("-")[-1][:-4]) - 1 for n in folder.glob("*.npz"))
 
 
 def make_dataset(episodes, config):
+    """
+    Create a dataset from the given episodes.
+
+    Args:
+        episodes: List of episodes.
+        config: Configuration object.
+
+    Returns:
+        Dataset for training.
+    """
     generator = tools.sample_episodes(episodes, config.batch_length)
     dataset = tools.from_generator(generator, config.batch_size)
     return dataset
 
 
 def make_env(config, mode, id):
+    """
+    Create an environment based on the configuration.
+
+    Args:
+        config: Configuration object.
+        mode: Mode of the environment (e.g., train or eval).
+        id: Environment ID.
+
+    Returns:
+        Wrapped environment instance.
+    """
     suite, task = config.task.split("_", 1)
     if suite == "dmc":
         import envs.dmc as dmc
@@ -204,6 +285,12 @@ def make_env(config, mode, id):
 
 
 def main(config):
+    """
+    Main function to initialize and run the Dreamer agent.
+
+    Args:
+        config: Configuration object.
+    """
     tools.set_seed_everywhere(config.seed)
     if config.deterministic_run:
         tools.enable_deterministic_run()
@@ -315,7 +402,7 @@ def main(config):
             )
             if config.video_pred_log:
                 video_pred = agent._wm.video_pred(next(eval_dataset))
-                logger.video("eval_openl", to_np(video_pred))
+                logger.video("eval_openl", video_pred)
         print("Start training.")
         state = tools.simulate(
             agent,
@@ -348,6 +435,13 @@ if __name__ == "__main__":
     )
 
     def recursive_update(base, update):
+        """
+        Recursively update a dictionary with values from another dictionary.
+
+        Args:
+            base: Base dictionary to be updated.
+            update: Dictionary with updated values.
+        """
         for key, value in update.items():
             if isinstance(value, dict) and key in base:
                 recursive_update(base[key], value)
